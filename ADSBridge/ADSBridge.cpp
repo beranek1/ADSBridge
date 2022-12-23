@@ -188,9 +188,9 @@ auto setVariableJSONValue(PAmsAddr pAddr, TwinCatVar variable, const nlohmann::j
 	else if (variable.type == "LREAL" && jsonValue.is_number_float()) {
 		nErr = writeGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, jsonValue.get<double>());
 	}
-	else if (variable.type == "STRING" && jsonValue.is_string()) {
+	else if (variable.type.starts_with("STRING") && jsonValue.is_string()) {
 		std::string valueStr = jsonValue.get<std::string>();
-		nErr = AdsSyncReadReq(pAddr, variable.indexGroup, variable.indexOffset, variable.size, valueStr.data());
+		nErr = AdsSyncWriteReq(pAddr, variable.indexGroup, variable.indexOffset, variable.size, valueStr.data());
 	}
 	else {
 		nErr = ADSERR_DEVICE_INVALIDDATA;
