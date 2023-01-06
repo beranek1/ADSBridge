@@ -65,12 +65,12 @@ struct TwinCatVar {
 	std::string comment;
 	std::string str() const {
 		std::stringstream strstream;
-		strstream << "{\"name\":\"" << name << "\",";
-		strstream << "\"indexGroup\":" << indexGroup << ",";
-		strstream << "\"indexOffset\":" << indexOffset << ",";
-		strstream << "\"size\":" << size << ",";
-		strstream << "\"type\":\"" << type << "\",";
-		strstream << "\"comment\":\"" << comment << "\"}";
+		strstream << "{\"Name\":\"" << name << "\",";
+		strstream << "\"IndexGroup\":" << indexGroup << ",";
+		strstream << "\"IndexOffset\":" << indexOffset << ",";
+		strstream << "\"Size\":" << size << ",";
+		strstream << "\"Type\":\"" << type << "\",";
+		strstream << "\"Comment\":\"" << comment << "\"}";
 		return strstream.str();
 	}
 };
@@ -220,10 +220,10 @@ int main(int argc, const char** argv)
 
 	// Create JSON string with version info
 	std::stringstream dllstrstream;
-	dllstrstream << "{\"version\":" << (int)pDLLVersion->version << ',';
-	dllstrstream << "\"revision\":" << (int)pDLLVersion->revision << ',';
-	dllstrstream << "\"build\":" << pDLLVersion->build << "}";
-	std::string DLLVersionStr { dllstrstream.str() };
+	dllstrstream << "{\"Version\":" << (int)pDLLVersion->version << ',';
+	dllstrstream << "\"Revision\":" << (int)pDLLVersion->revision << ',';
+	dllstrstream << "\"Build\":" << pDLLVersion->build << "}";
+	std::string DLLVersionStr{ dllstrstream.str() };
 	std::cout << DLLVersionStr << '\n';
 
 	// Map for storing symbol/variable definitions
@@ -233,11 +233,11 @@ int main(int argc, const char** argv)
 	std::cout << "Starting symbol declaration update thread..." << '\n';
 	std::jthread t1([pAddr, &symbols] {
 		using namespace std::chrono_literals;
-		while (true) {
-			symbols = getSymbolMap(pAddr).second;
-			std::this_thread::sleep_for(5s);
-		}
-	});
+	while (true) {
+		symbols = getSymbolMap(pAddr).second;
+		std::this_thread::sleep_for(5s);
+	}
+		});
 
 	// Outputs DLL version information as json string
 	svr.Get("/version", [DLLVersionStr](const httplib::Request& req, httplib::Response& res) {
@@ -247,202 +247,221 @@ int main(int argc, const char** argv)
 	// Gets status of PLC
 	svr.Get("/state", [pAddr](const httplib::Request& req, httplib::Response& res) {
 		uint16_t nAdsState;
-		uint16_t nDeviceState;
-		std::stringstream strstream;
-		long nErr = AdsSyncReadStateReq(pAddr, &nAdsState, &nDeviceState);
-		if (nErr) {
-			strstream << "{\"error\":\"ADS request unsuccessful.\",\"errorNum\":" << nErr << '}';
-		}
-		else
-		{
-			strstream << "{\"adsState\":" << nAdsState << ',';
-			strstream << "\"deviceState\":" << nDeviceState << '}';
-		}
+	uint16_t nDeviceState;
+	std::stringstream strstream;
+	long nErr = AdsSyncReadStateReq(pAddr, &nAdsState, &nDeviceState);
+	if (nErr) {
+		strstream << "{\"Error\":\"ADS request unsuccessful.\",\"ErrorNum\":" << nErr << '}';
+	}
+	else
+	{
+		strstream << "{\"Ads\":" << nAdsState << ',';
+		strstream << "\"Device\":" << nDeviceState << '}';
+	}
 
-		res.set_content(strstream.str(), "text/json");
+	res.set_content(strstream.str(), "text/json");
 		});
 
 	// Gets device info of ADS server
-	svr.Get("/deviceInfo", [pAddr](const httplib::Request& req, httplib::Response& res) {
+	svr.Get("/device/info", [pAddr](const httplib::Request& req, httplib::Response& res) {
 		char pDevName[50];
-		AdsVersion Version{};
-		AdsVersion* pVersion = &Version;
-		std::stringstream strstream;
-		long nErr = AdsSyncReadDeviceInfoReq(pAddr, pDevName, pVersion);
-		if (nErr) {
-			strstream << "{\"error\":\"ADS request unsuccessful.\",\"errorNum\":" << nErr << '}';
-		}
-		else
-		{
-			strstream << "{\"devName\":\"" << pDevName << "\",";
-			strstream << "\"version\":{";
-			strstream << "\"version\":" << (int)pVersion->version << ',';
-			strstream << "\"revision\":" << (int)pVersion->revision << ',';
-			strstream << "\"build\":" << pVersion->build << "}}";
-		}
+	AdsVersion Version{};
+	AdsVersion* pVersion = &Version;
+	std::stringstream strstream;
+	long nErr = AdsSyncReadDeviceInfoReq(pAddr, pDevName, pVersion);
+	if (nErr) {
+		strstream << "{\"Error\":\"ADS request unsuccessful.\",\"ErrorNum\":" << nErr << '}';
+	}
+	else
+	{
+		strstream << "{\"Name\":\"" << pDevName << "\",";
+		strstream << "\"Version\":{";
+		strstream << "\"Version\":" << (int)pVersion->version << ',';
+		strstream << "\"Revision\":" << (int)pVersion->revision << ',';
+		strstream << "\"Build\":" << pVersion->build << "}}";
+	}
 
-		res.set_content(strstream.str(), "text/json");
+	res.set_content(strstream.str(), "text/json");
 		});
 
 	// Reads data
 	svr.Get(R"(/read/(\w+)/(\w+)/(\w+))", [pAddr](const httplib::Request& req, httplib::Response& res) {
 		std::vector<std::string> paths = splitPath(req.path);
-		unsigned long nIndexGroup = std::stoul(paths.at(2), nullptr, 0);
-		unsigned long nIndexOffset = std::stoul(paths.at(3), nullptr, 0);
-		uint64_t nLength = std::stoul(paths.at(4), nullptr, 0);
-		std::stringstream strstream;
-		if (nLength >= 255) {
-			strstream << "{\"error\":\"Max allowed length is 255 bytes.\"}";
+	unsigned long nIndexGroup = std::stoul(paths.at(2), nullptr, 0);
+	unsigned long nIndexOffset = std::stoul(paths.at(3), nullptr, 0);
+	uint64_t nLength = std::stoul(paths.at(4), nullptr, 0);
+	std::stringstream strstream;
+	if (nLength >= 255) {
+		strstream << "{\"Error\":\"Max allowed length is 255 bytes.\"}";
+	}
+	else {
+		unsigned char pData[256];
+
+		long nErr = AdsSyncReadReq(pAddr, nIndexGroup, nIndexOffset, sizeof(pData), &pData);
+		if (nErr) {
+			strstream << "{\"Error\":\"ADS request unsuccessful.\",\"ErrorNum\":" << nErr << '}';
 		}
 		else {
-			unsigned char pData[256];
-
-			long nErr = AdsSyncReadReq(pAddr, nIndexGroup, nIndexOffset, sizeof(pData), &pData);
-			if (nErr) {
-				strstream << "{\"error\":\"ADS request unsuccessful.\",\"errorNum\":" << nErr << '}';
-			}
-			else {
-				strstream << "{\"data\":\"";
-				for (size_t i = 0; i < nLength; ++i)
-					strstream << std::hex << (int)pData[i];
-				strstream << "\"}";
-			}
+			strstream << "{\"Data\":\"";
+			for (size_t i = 0; i < nLength; ++i)
+				strstream << std::hex << (int)pData[i];
+			strstream << "\"}";
 		}
+	}
 
-		res.set_content(strstream.str(), "text/json");
+	res.set_content(strstream.str(), "text/json");
 		});
 
 	// Get handle of variable
-	svr.Get(R"(/getSymbolHandle/((\w|\.)+))", [pAddr](const httplib::Request& req, httplib::Response& res) {
+	svr.Get(R"(/symbol/((\w|\.)+)/handle)", [pAddr](const httplib::Request& req, httplib::Response& res) {
 		std::vector<std::string> paths = splitPath(req.path);
-		std::string nameStr = paths.at(2);
-		auto [nErr, symHandle] = getSymHandleByName(pAddr, nameStr);
+	std::string nameStr = paths.at(2);
+	auto [nErr, symHandle] = getSymHandleByName(pAddr, nameStr);
+	std::stringstream strstream;
+	if (nErr) {
+		strstream << "{\"Error\":\"ADS request unsuccessful.\",\"ErrorNum\":" << nErr << '}';
+	}
+	else {
+		strstream << "{\"Handle\":" << symHandle << "}";
+	}
+
+	res.set_content(strstream.str(), "text/json");
+		});
+
+	// Get info of all variables
+	svr.Get(R"(/symbol)", [pAddr, &symbols](const httplib::Request& req, httplib::Response& res) {
 		std::stringstream strstream;
-		if (nErr) {
-			strstream << "{\"error\":\"ADS request unsuccessful.\",\"errorNum\":" << nErr << '}';
+	strstream << "{";
+	bool first = true;
+	for (const auto& [key, value] : symbols) {
+		if (!first) {
+			strstream << ",";
 		}
 		else {
-			strstream << "{\"handle\":" << symHandle << "}";
+			first = false;
 		}
+		strstream << "\"" + key + "\":" + value.str();
+	}
+	strstream << "}";
 
-		res.set_content(strstream.str(), "text/json");
+	res.set_content(strstream.str(), "text/json");
 		});
 
 	// Get info of variable
-	svr.Get(R"(/getSymbolInfo/((\w|\.)+))", [pAddr, &symbols](const httplib::Request& req, httplib::Response& res) {
+	svr.Get(R"(/symbol/((\w|\.)+))", [pAddr, &symbols](const httplib::Request& req, httplib::Response& res) {
 		std::vector<std::string> paths = splitPath(req.path);
-		std::string nameStr = paths.at(2);
-		std::stringstream strstream;
-		if (!symbols.contains(nameStr)) {
-			strstream << "{\"error\":\"Symbol/Variable not found.\",\"errorNum\":" << 404 << '}';
-		}
-		else {
-			TwinCatVar variable = symbols[nameStr];
-			strstream << variable.str();
-		}
+	std::string nameStr = paths.at(2);
+	std::stringstream strstream;
+	if (!symbols.contains(nameStr)) {
+		strstream << "{\"Error\":\"Symbol/Variable not found.\",\"ErrorNum\":" << 404 << '}';
+	}
+	else {
+		TwinCatVar variable = symbols[nameStr];
+		strstream << variable.str();
+	}
 
-		res.set_content(strstream.str(), "text/json");
+	res.set_content(strstream.str(), "text/json");
 		});
 
-	svr.Get(R"(/getSymbolValue/((\w|\.)+))", [pAddr, &symbols](const httplib::Request& req, httplib::Response& res) {
+	svr.Get(R"(/symbol/((\w|\.)+)/value)", [pAddr, &symbols](const httplib::Request& req, httplib::Response& res) {
 		std::vector<std::string> paths = splitPath(req.path);
-		std::string nameStr = paths.at(2);
-		std::stringstream strstream;
-		if (!symbols.contains(nameStr)) {
-			strstream << "{\"error\":\"Symbol/Variable not found.\",\"errorNum\":" << 404 << '}';
+	std::string nameStr = paths.at(2);
+	std::stringstream strstream;
+	if (!symbols.contains(nameStr)) {
+		strstream << "{\"Error\":\"Symbol/Variable not found.\",\"ErrorNum\":" << 404 << '}';
+	}
+	else {
+		TwinCatVar variable = symbols[nameStr];
+		auto [nErr, value] = getVariableJSONValue(pAddr, variable);
+		if (nErr) {
+			strstream << "{\"Error\":\"ADS request unsuccessful.\",\"ErrorNum\":" << nErr << '}';
 		}
 		else {
-			TwinCatVar variable = symbols[nameStr];
-			auto [nErr, value] = getVariableJSONValue(pAddr, variable);
-			if (nErr) {
-				strstream << "{\"error\":\"ADS request unsuccessful.\",\"errorNum\":" << nErr << '}';
-			}
-			else {
-				strstream << "{\"data\":" << value << "}";
-			}
+			strstream << "{\"Data\":" << value << "}";
 		}
+	}
 
-		res.set_content(strstream.str(), "text/json");
+	res.set_content(strstream.str(), "text/json");
 		});
 
-	svr.Post(R"(/setSymbolValue/((\w|\.)+))", [pAddr, &symbols](const httplib::Request& req, httplib::Response& res, const httplib::ContentReader& content_reader) {
+	svr.Post(R"(/symbol/((\w|\.)+)/value)", [pAddr, &symbols](const httplib::Request& req, httplib::Response& res, const httplib::ContentReader& content_reader) {
 		std::vector<std::string> paths = splitPath(req.path);
-		std::string nameStr = paths.at(2);
-		std::stringstream strstream;
-		if (!symbols.contains(nameStr)) {
-			strstream << "{\"error\":\"Symbol/Variable not found.\",\"errorNum\":" << 404 << '}';
-		}
-		else {
-			TwinCatVar variable = symbols[nameStr];
-			std::string body;
-			content_reader([&](const char* data, size_t data_length) {
-				body.append(data, data_length);
-				return true;
-				});
-			auto json = nlohmann::json::parse(body);
-			long nErr = setVariableJSONValue(pAddr, variable, json["data"]);
-			if (nErr) {
-				strstream << "{\"error\":\"ADS request unsuccessful.\",\"errorNum\":" << nErr << '}';
-			}
-			else {
-				strstream << body;
-			}
-		}
-
-		res.set_content(strstream.str(), "text/json");
-		});
-
-	svr.Post(R"(/writeControl)", [pAddr, &symbols](const httplib::Request& req, httplib::Response& res, const httplib::ContentReader& content_reader) {
-		std::vector<std::string> paths = splitPath(req.path);
-		std::stringstream strstream;
+	std::string nameStr = paths.at(2);
+	std::stringstream strstream;
+	if (!symbols.contains(nameStr)) {
+		strstream << "{\"Error\":\"Symbol/Variable not found.\",\"ErrorNum\":" << 404 << '}';
+	}
+	else {
+		TwinCatVar variable = symbols[nameStr];
 		std::string body;
 		content_reader([&](const char* data, size_t data_length) {
 			body.append(data, data_length);
-			return true;
+		return true;
 			});
 		auto json = nlohmann::json::parse(body);
-		bool readState = false;
-		uint16_t nAdsState{};
-		uint16_t nDeviceState{};
-		long nErr{};
-		if (json.contains("adsState")) {
-			if (!json["adsState"].is_number_unsigned()) {
-				strstream << "{\"error\":\"adsState must be unsigned integer.\"}";
-				res.set_content(strstream.str(), "text/json");
-				return;
-			}
-			nAdsState = json["adsState"].get<uint16_t>();
-			if (nAdsState >= ADSSTATE_MAXSTATES) {
-				strstream << "{\"error\":\"Invalid ADSState.\"}";
-				res.set_content(strstream.str(), "text/json");
-				return;
-			}
-		}
-		else {
-			nErr = AdsSyncReadStateReq(pAddr, &nAdsState, &nDeviceState);
-			readState = true;
-		}
-		if (json.contains("deviceState")) {
-			if (!json["deviceState"].is_number_unsigned()) {
-				strstream << "{\"error\":\"deviceState must be unsigned integer.\"}";
-				res.set_content(strstream.str(), "text/json");
-				return;
-			}
-			nDeviceState = json["deviceState"].get<uint16_t>();
-		}
-		else if (!readState) {
-			nErr = AdsSyncReadStateReq(pAddr, nullptr, &nDeviceState);
-			readState = true;
-		}
-		nErr = AdsSyncWriteControlReq(pAddr, nAdsState, nDeviceState, 0, NULL);
+		long nErr = setVariableJSONValue(pAddr, variable, json["Data"]);
 		if (nErr) {
-			strstream << "{\"error\":\"ADS request unsuccessful.\",\"errorNum\":" << nErr << '}';
+			strstream << "{\"Error\":\"ADS request unsuccessful.\",\"ErrorNum\":" << nErr << '}';
 		}
 		else {
 			strstream << body;
 		}
+	}
 
-		res.set_content(strstream.str(), "text/json");
+	res.set_content(strstream.str(), "text/json");
+		});
+
+	svr.Post(R"(/state)", [pAddr, &symbols](const httplib::Request& req, httplib::Response& res, const httplib::ContentReader& content_reader) {
+		std::vector<std::string> paths = splitPath(req.path);
+	std::stringstream strstream;
+	std::string body;
+	content_reader([&](const char* data, size_t data_length) {
+		body.append(data, data_length);
+	return true;
+		});
+	auto json = nlohmann::json::parse(body);
+	bool readState = false;
+	uint16_t nAdsState{};
+	uint16_t nDeviceState{};
+	long nErr{};
+	if (json.contains("Ads")) {
+		if (!json["Ads"].is_number_unsigned()) {
+			strstream << "{\"Error\":\"adsState must be unsigned integer.\"}";
+			res.set_content(strstream.str(), "text/json");
+			return;
+		}
+		nAdsState = json["Ads"].get<uint16_t>();
+		if (nAdsState >= ADSSTATE_MAXSTATES) {
+			strstream << "{\"Error\":\"Invalid ADSState.\"}";
+			res.set_content(strstream.str(), "text/json");
+			return;
+		}
+	}
+	else {
+		nErr = AdsSyncReadStateReq(pAddr, &nAdsState, &nDeviceState);
+		readState = true;
+	}
+	if (json.contains("Device")) {
+		if (!json["Device"].is_number_unsigned()) {
+			strstream << "{\"error\":\"deviceState must be unsigned integer.\"}";
+			res.set_content(strstream.str(), "text/json");
+			return;
+		}
+		nDeviceState = json["Device"].get<uint16_t>();
+	}
+	else if (!readState) {
+		nErr = AdsSyncReadStateReq(pAddr, nullptr, &nDeviceState);
+		readState = true;
+	}
+	nErr = AdsSyncWriteControlReq(pAddr, nAdsState, nDeviceState, 0, NULL);
+	if (nErr) {
+		strstream << "{\"Error\":\"ADS request unsuccessful.\",\"ErrorNum\":" << nErr << '}';
+	}
+	else {
+		strstream << body;
+	}
+
+	res.set_content(strstream.str(), "text/json");
 		});
 
 	auto port = 1234;
