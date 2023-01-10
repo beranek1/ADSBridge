@@ -20,7 +20,8 @@ typedef enum AdsDataType
 	ADST_WSTRING = 31,
 	ADST_REAL80 = 32,
 	ADST_BIT = 33,
-	ADST_MAXTYPES
+	ADST_MAXTYPES = 34,
+	ADST_BIGTYPE = 65
 } ADSDATATYPE;
 
 // Splits string by slash (path separator)
@@ -88,10 +89,6 @@ struct TwinCatType {
 	std::map<std::string, TwinCatType> subItems;
 	ADS_UINT32		entryLength;
 	ADS_UINT32		version;
-	ADS_UINT32		hashValue;
-	ADS_UINT32		offsGetCode;
-	ADS_UINT32		typeHashValue;
-	ADS_UINT32		offsSetCode;
 	ADS_UINT32		size;
 	ADS_UINT32		offs;
 	ADS_UINT32		dataType;
@@ -161,10 +158,6 @@ TwinCatType getDatatype(PAdsDatatypeEntry datatypeEntry) {
 	}
 	ADS_UINT32		entryLength = datatypeEntry->entryLength;
 	ADS_UINT32		version = datatypeEntry->version;
-	ADS_UINT32		hashValue = datatypeEntry->hashValue;
-	ADS_UINT32		offsGetCode = datatypeEntry->offsGetCode;
-	ADS_UINT32		typeHashValue = datatypeEntry->typeHashValue;
-	ADS_UINT32		offsSetCode = datatypeEntry->offsSetCode;
 	ADS_UINT32		size = datatypeEntry->size;
 	ADS_UINT32		offs = datatypeEntry->offs;
 	ADS_UINT32		dataType = datatypeEntry->dataType;
@@ -179,8 +172,42 @@ TwinCatType getDatatype(PAdsDatatypeEntry datatypeEntry) {
 		arrayInfo = (*((unsigned long*)(((char*)arrayInfo) + (sizeof(AdsDatatypeArrayInfo)))) \
 			? ((PAdsDatatypeArrayInfo)(((char*)arrayInfo) + (sizeof(AdsDatatypeArrayInfo)))) : NULL);
 	}
-	return TwinCatType{ name, type, comment, subItems, entryLength, version, hashValue, offsGetCode, typeHashValue, offsSetCode, size, offs, dataType, flags, arrayDim, arrayVector };
+	return TwinCatType{ name, type, comment, subItems, entryLength, version, size, offs, dataType, flags, arrayDim, arrayVector };
 }
+
+TwinCatType getDatatypeRecursive(std::map<std::string, TwinCatType> datatypes, std::string name, bool firstLevel = true) {
+	TwinCatType oldtype = datatypes[name];
+	TwinCatType newtype = TwinCatType{ oldtype.name, oldtype.type, oldtype.comment, {}, oldtype.entryLength, oldtype.version, oldtype.size, oldtype.offs, oldtype.dataType, 0, oldtype.arrayDim, {} };
+	if (oldtype.subItems.size() > 0) {
+		for (const auto& [key, value] : oldtype.subItems) {
+			TwinCatType subtype = getDatatypeRecursive(datatypes, value.type, false);
+			subtype.type = subtype.name;
+			subtype.name = key;
+			subtype.offs = value.offs;
+			subtype.comment = value.comment;
+			newtype.subItems[key] = subtype;
+		}
+	}
+	else if ((oldtype.type == "" || oldtype.dataType < ADST_MAXTYPES) && oldtype.arrayVector.size() == 0) {
+	} else if (oldtype.dataType == ADST_BIGTYPE && oldtype.arrayVector.size() == 0) {
+		if (oldtype.size == 4) {
+			newtype.dataType = ADST_UINT32;
+		}
+		else if (oldtype.size == 8) {
+			newtype.dataType = ADST_UINT64;
+		}
+	} else if (oldtype.arrayVector.size() > 0) {
+		newtype = getDatatypeRecursive(datatypes, oldtype.type, false);
+		std::vector<TwinCatArray> vec = oldtype.arrayVector;
+		vec.insert(vec.end(), newtype.arrayVector.begin(), newtype.arrayVector.end());
+		newtype.arrayVector = vec;
+	}
+	else {
+		newtype = getDatatypeRecursive(datatypes, oldtype.type, false);
+	}
+	return newtype;
+}
+
 
 // Returns all datatype declarations
 auto getDatatypeMap(PAmsAddr pAddr, AdsSymbolUploadInfo2 info) {
@@ -224,10 +251,10 @@ auto getSymbolMap(PAmsAddr pAddr, AdsSymbolUploadInfo2 info, std::map<std::strin
 std::pair<long, std::string> getVariableJSONValue(PAmsAddr pAddr, TwinCatType datatype, ULONG indexGroup, ULONG indexOffset, bool aryItem = false);
 
 // Adapted from: https://github.com/jisotalo/ads-client/blob/master/src/ads-client.js
-std::string parseArray(PAmsAddr pAddr, TwinCatType datatype, ULONG indexGroup, ULONG indexOffset, ADS_UINT16 dim) {
+std::pair<std::string, ULONG> parseArray(PAmsAddr pAddr, TwinCatType datatype, ULONG indexGroup, ULONG indexOffset, ADS_UINT16 dim) {
 	std::stringstream rstream;
 	rstream << "[";
-	ULONG offset = 0;
+	ULONG offset = indexOffset;
 	bool first = true;
 	for (ADS_UINT16 i = 0; i < datatype.arrayVector[dim].size; i++) {
 		if (!first) {
@@ -237,24 +264,28 @@ std::string parseArray(PAmsAddr pAddr, TwinCatType datatype, ULONG indexGroup, U
 			first = false;
 		}
 		if ((dim + 1) < datatype.arrayVector.size()) {
-			rstream << parseArray(pAddr, datatype, indexGroup, indexOffset, dim + 1);
+			auto [value, noffset] = parseArray(pAddr, datatype, indexGroup, offset, dim + 1);
+			rstream << value;
+			offset = noffset;
 		}
 		else {
-			rstream << getVariableJSONValue(pAddr, datatype, indexGroup, indexOffset + offset, true).second;
+			rstream << getVariableJSONValue(pAddr, datatype, indexGroup, offset, true).second;
 			offset += datatype.size;
 		}
 	}
 	rstream << "]";
-	return rstream.str();
+	return std::make_pair(rstream.str(), offset);
 }
 
 // Reads value of symbol/variable and returns JSON string representation
 std::pair<long, std::string> getVariableJSONValue(PAmsAddr pAddr, TwinCatType datatype, ULONG indexGroup, ULONG indexOffset, bool aryItem) {
 	long nErr{};
+	std::cout << datatype.name << "," << datatype.type << "," << datatype.dataType << "\n";
 	std::string value;
-	if ((datatype.arrayDim == 0 || aryItem) && datatype.subItems.size() > 0) {
+	if ((datatype.arrayVector.size() == 0 || aryItem) && datatype.subItems.size() > 0) {
 		std::stringstream vstream;
 		vstream << "{";
+		ULONG offset = indexOffset + datatype.offs;
 		bool first = true;
 		for (const auto& [key, value] : datatype.subItems) {
 			if (!first) {
@@ -264,7 +295,8 @@ std::pair<long, std::string> getVariableJSONValue(PAmsAddr pAddr, TwinCatType da
 				first = false;
 			}
 			vstream << "\"" << key << "\":";
-			auto [err, data] = getVariableJSONValue(pAddr, value, indexGroup, indexOffset + value.offs);
+			auto [err, data] = getVariableJSONValue(pAddr, value, indexGroup, offset);
+			offset += value.size;
 			if (err) {
 				nErr = err;
 				vstream << "null";
@@ -276,8 +308,8 @@ std::pair<long, std::string> getVariableJSONValue(PAmsAddr pAddr, TwinCatType da
 		vstream << "}";
 		value = vstream.str();
 	}
-	else if (datatype.arrayDim > 0 && !aryItem) {
-		value = parseArray(pAddr, datatype, indexGroup, indexOffset, 0);
+	else if (datatype.arrayVector.size() > 0 && !aryItem) {
+		value = parseArray(pAddr, datatype, indexGroup, indexOffset, 0).first;
 	}
 	else {
 		switch ((ADSDATATYPE)datatype.dataType)
@@ -341,55 +373,96 @@ std::pair<long, std::string> getVariableJSONValue(PAmsAddr pAddr, TwinCatType da
 	return std::pair(nErr, value);
 }
 
-auto getVariableJSONValue(PAmsAddr pAddr, TwinCatVar variable) {
-	return getVariableJSONValue(pAddr, variable.datatype, variable.indexGroup, variable.indexOffset);
+auto getVariableJSONValue(PAmsAddr pAddr, std::map<std::string, TwinCatType> datatypes, TwinCatVar variable) {
+	// return getVariableJSONValue(pAddr, variable.datatype, variable.indexGroup, variable.indexOffset);
+	return getVariableJSONValue(pAddr, getDatatypeRecursive(datatypes, variable.datatype.name), variable.indexGroup, variable.indexOffset);
+}
+
+long setVariableJSONValue(PAmsAddr pAddr, TwinCatType datatype, ULONG indexGroup, ULONG indexOffset, const nlohmann::json jsonValue, bool aryItem = false);
+
+// Adapted from: https://github.com/jisotalo/ads-client/blob/master/src/ads-client.js
+std::pair<long, ULONG> unparseArray(PAmsAddr pAddr, TwinCatType datatype, ULONG indexGroup, ULONG indexOffset, const nlohmann::json jsonValue, ADS_UINT16 dim) {
+	long nErr{};
+	ULONG offset = indexOffset;
+	for (ADS_UINT16 i = 0; i < datatype.arrayVector[dim].size; i++) {
+		if ((dim + 1) < datatype.arrayVector.size()) {
+			auto [err, noffset] = unparseArray(pAddr, datatype, indexGroup, offset, jsonValue[i], dim + 1);
+			nErr = err;
+			offset = noffset;
+		}
+		else {
+			nErr = setVariableJSONValue(pAddr, datatype, indexGroup, offset, jsonValue[i], true);
+			offset += datatype.size;
+		}
+		if (nErr) {
+			break;
+		}
+	}
+	return std::make_pair(nErr, offset);
 }
 
 // Updates symbol/variable based on provided json value
-auto setVariableJSONValue(PAmsAddr pAddr, TwinCatVar variable, const nlohmann::json jsonValue) {
+long setVariableJSONValue(PAmsAddr pAddr, TwinCatType datatype, ULONG indexGroup, ULONG indexOffset, const nlohmann::json jsonValue, bool aryItem) {
 	long nErr{};
-	std::string value;
-	if (variable.type == "BOOL" && jsonValue.is_boolean()) {
-		nErr = writeGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, jsonValue.get<bool>());
+	if ((datatype.arrayVector.size() == 0 || aryItem) && datatype.subItems.size() > 0) {
+		for (const auto& [key, value] : datatype.subItems) {
+			if (!nErr) {
+				nErr = setVariableJSONValue(pAddr, value, indexGroup, indexOffset + value.offs, jsonValue[key]);
+			}
+		}
 	}
-	else if (variable.type == "USINT" && jsonValue.is_number_unsigned()) {
-		nErr = writeGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, jsonValue.get<uint8_t>());
-	}
-	else if (variable.type == "SINT" && jsonValue.is_number_integer()) {
-		nErr = writeGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, jsonValue.get<int8_t>());
-	}
-	else if ((variable.type == "UINT" || variable.type == "WORD") && jsonValue.is_number_unsigned()) {
-		nErr = writeGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, jsonValue.get<uint16_t>());
-	}
-	else if (variable.type == "INT" && jsonValue.is_number_integer()) {
-		nErr = writeGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, jsonValue.get<int16_t>());
-	}
-	else if ((variable.type == "UDINT" || variable.type == "DWORD") && jsonValue.is_number_unsigned()) {
-		nErr = writeGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, jsonValue.get<uint32_t>());
-	}
-	else if (variable.type == "DINT" && jsonValue.is_number_integer()) {
-		nErr = writeGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, jsonValue.get<int32_t>());
-	}
-	else if ((variable.type == "ULINT" || variable.type == "LWORD") && jsonValue.is_number_unsigned()) {
-		nErr = writeGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, jsonValue.get<uint64_t>());
-	}
-	else if (variable.type == "LINT" && jsonValue.is_number_integer()) {
-		nErr = writeGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, jsonValue.get<int64_t>());
-	}
-	else if (variable.type == "REAL" && jsonValue.is_number_float()) {
-		nErr = writeGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, jsonValue.get<float>());
-	}
-	else if (variable.type == "LREAL" && jsonValue.is_number_float()) {
-		nErr = writeGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, jsonValue.get<double>());
-	}
-	else if (variable.type.starts_with("STRING") && jsonValue.is_string()) {
-		std::string valueStr = jsonValue.get<std::string>();
-		nErr = AdsSyncWriteReq(pAddr, variable.indexGroup, variable.indexOffset, variable.size, valueStr.data());
+	else if (datatype.arrayVector.size() > 0 && !aryItem) {
+		nErr = unparseArray(pAddr, datatype, indexGroup, indexOffset, jsonValue, 0).first;
 	}
 	else {
-		nErr = ADSERR_DEVICE_INVALIDDATA;
+		ADSDATATYPE type = (ADSDATATYPE)datatype.dataType;
+		if (type == ADST_VOID && jsonValue.is_null()) {
+		}
+		else if (type == ADST_BIT && jsonValue.is_boolean()) {
+			nErr = writeGroupOffset(pAddr, indexGroup, indexOffset, jsonValue.get<bool>());
+		}
+		else if (type == ADST_INT8 && jsonValue.is_number_integer()) {
+			nErr = writeGroupOffset(pAddr, indexGroup, indexOffset, jsonValue.get<int8_t>());
+		}
+		else if (type == ADST_INT16 && jsonValue.is_number_integer()) {
+			nErr = writeGroupOffset(pAddr, indexGroup, indexOffset, jsonValue.get<int16_t>());
+			}
+		else if (type == ADST_INT32 && jsonValue.is_number_integer()) {
+			nErr = writeGroupOffset(pAddr, indexGroup, indexOffset, jsonValue.get<int32_t>());
+		}
+		else if (type == ADST_INT64 && jsonValue.is_number_integer()) {
+			nErr = writeGroupOffset(pAddr, indexGroup, indexOffset, jsonValue.get<int64_t>());
+		}
+		else if (type == ADST_UINT8 && jsonValue.is_number_unsigned()) {
+			nErr = writeGroupOffset(pAddr, indexGroup, indexOffset, jsonValue.get<uint8_t>());
+		}
+		else if (type == ADST_UINT16 && jsonValue.is_number_unsigned()) {
+			nErr = writeGroupOffset(pAddr, indexGroup, indexOffset, jsonValue.get<uint16_t>());
+		}
+		else if (type == ADST_UINT32 && jsonValue.is_number_unsigned()) {
+			nErr = writeGroupOffset(pAddr, indexGroup, indexOffset, jsonValue.get<uint32_t>());
+		}
+		else if (type == ADST_UINT64 && jsonValue.is_number_unsigned()) {
+			nErr = writeGroupOffset(pAddr, indexGroup, indexOffset, jsonValue.get<uint64_t>());
+		}
+		else if (type == ADST_REAL32 && jsonValue.is_number_float()) {
+			nErr = writeGroupOffset(pAddr, indexGroup, indexOffset, jsonValue.get<float>());
+		}
+		else if (type == ADST_REAL64 && jsonValue.is_number_float()) {
+			nErr = writeGroupOffset(pAddr, indexGroup, indexOffset, jsonValue.get<double>());
+		}
+		else if (type == ADST_STRING && jsonValue.is_string()) {
+			std::string valueStr = jsonValue.get<std::string>();
+			nErr = AdsSyncWriteReq(pAddr, indexGroup, indexOffset, datatype.size, valueStr.data());
+		} else {
+			nErr = ADSERR_DEVICE_INVALIDDATA;
+		}
 	}
 	return nErr;
+}
+
+auto setVariableJSONValue(PAmsAddr pAddr, std::map<std::string, TwinCatType> datatypes, TwinCatVar variable, const nlohmann::json jsonValue) {
+	return setVariableJSONValue(pAddr, getDatatypeRecursive(datatypes, variable.datatype.name), variable.indexGroup, variable.indexOffset, jsonValue);
 }
 
 int main(int argc, const char** argv)
@@ -571,7 +644,7 @@ int main(int argc, const char** argv)
 	}
 	else {
 		TwinCatVar variable = symbols[nameStr];
-		auto [nErr, value] = getVariableJSONValue(pAddr, variable);
+		auto [nErr, value] = getVariableJSONValue(pAddr, datatypes, variable);
 		if (nErr) {
 			strstream << "{\"Error\":\"ADS request unsuccessful.\",\"ErrorNum\":" << nErr << '}';
 		}
@@ -583,7 +656,7 @@ int main(int argc, const char** argv)
 	res.set_content(strstream.str(), "text/json");
 		});
 
-	svr.Post(R"(/symbol/((\w|\.)+)/value)", [pAddr, &symbols](const httplib::Request& req, httplib::Response& res, const httplib::ContentReader& content_reader) {
+	svr.Post(R"(/symbol/((\w|\.)+)/value)", [pAddr, &symbols, &datatypes](const httplib::Request& req, httplib::Response& res, const httplib::ContentReader& content_reader) {
 		std::vector<std::string> paths = splitPath(req.path);
 	std::string nameStr = paths.at(2);
 	std::stringstream strstream;
@@ -598,7 +671,7 @@ int main(int argc, const char** argv)
 		return true;
 			});
 		auto json = nlohmann::json::parse(body);
-		long nErr = setVariableJSONValue(pAddr, variable, json["Data"]);
+		long nErr = setVariableJSONValue(pAddr, datatypes, variable, json["Data"]);
 		if (nErr) {
 			strstream << "{\"Error\":\"ADS request unsuccessful.\",\"ErrorNum\":" << nErr << '}';
 		}
