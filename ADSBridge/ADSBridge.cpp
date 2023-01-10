@@ -2,6 +2,27 @@
 //
 #include "ADSBridge.h"
 
+
+typedef enum AdsDataType
+{
+	ADST_VOID = 0,
+	ADST_INT16 = 2,
+	ADST_INT32 = 3,
+	ADST_REAL32 = 4,
+	ADST_REAL64 = 5,
+	ADST_INT8 = 16,
+	ADST_UINT8 = 17,
+	ADST_UINT16 = 18,
+	ADST_UINT32 = 19,
+	ADST_INT64 = 20,
+	ADST_UINT64 = 21,
+	ADST_STRING = 30,
+	ADST_WSTRING = 31,
+	ADST_REAL80 = 32,
+	ADST_BIT = 33,
+	ADST_MAXTYPES
+} ADSDATATYPE;
+
 // Splits string by slash (path separator)
 std::vector<std::string> splitPath(std::string path) {
 	std::vector<std::string> paths{};
@@ -55,6 +76,30 @@ auto getSymValueByHandle(PAmsAddr pAddr, const ULONG& symHandle, auto& nData) {
 	return readGroupOffset(ADSIGRP_SYM_VALBYHND, symHandle, nData);
 }
 
+struct TwinCatArray {
+	unsigned long   bound;
+	unsigned long   size;
+};
+
+struct TwinCatType {
+	std::string name;
+	std::string type;
+	std::string comment;
+	std::map<std::string, TwinCatType> subItems;
+	ADS_UINT32		entryLength;
+	ADS_UINT32		version;
+	ADS_UINT32		hashValue;
+	ADS_UINT32		offsGetCode;
+	ADS_UINT32		typeHashValue;
+	ADS_UINT32		offsSetCode;
+	ADS_UINT32		size;
+	ADS_UINT32		offs;
+	ADS_UINT32		dataType;
+	ADS_UINT32		flags;
+	ADS_UINT16		arrayDim;
+	std::vector<TwinCatArray>   arrayVector;
+};
+
 // Store symbol/variable declaration
 struct TwinCatVar {
 	std::string name;
@@ -63,6 +108,7 @@ struct TwinCatVar {
 	ULONG size;
 	std::string type;
 	std::string comment;
+	TwinCatType datatype;
 	std::string str() const {
 		std::stringstream strstream;
 		strstream << "{\"Name\":\"" << name << "\",";
@@ -75,17 +121,91 @@ struct TwinCatVar {
 	}
 };
 
+auto getUploadInfo(PAmsAddr pAddr) {
+	AdsSymbolUploadInfo2 tAdsSymbolUploadInfo;
+	long nErr = AdsSyncReadReq(pAddr, ADSIGRP_SYM_UPLOADINFO2, 0x0, sizeof(tAdsSymbolUploadInfo), &tAdsSymbolUploadInfo);
+	return std::make_pair(nErr, tAdsSymbolUploadInfo);
+}
+
+auto getSymbolUpload(PAmsAddr pAddr, AdsSymbolUploadInfo2 info) {
+	char* symbolUpload = new char[info.nSymSize];
+	long nErr = AdsSyncReadReq(pAddr, ADSIGRP_SYM_UPLOAD, 0, info.nSymSize, symbolUpload);
+	return std::make_pair(nErr, symbolUpload);
+}
+
+auto getDatatypeUpload(PAmsAddr pAddr, AdsSymbolUploadInfo2 info) {
+	char* dataUpload = new char[info.nDatatypeSize];
+	long nErr = AdsSyncReadReq(pAddr, ADSIGRP_SYM_DT_UPLOAD, 0, info.nDatatypeSize, dataUpload);
+	return std::make_pair(nErr, dataUpload);
+}
+
+bool isDatatype(PAdsDatatypeEntry datatype) {
+	if (datatype->flags == 0) return FALSE;
+	return (datatype->flags & ADSDATATYPEFLAG_DATATYPE) == ADSDATATYPEFLAG_DATATYPE;
+}
+
+bool isDataitem(PAdsDatatypeEntry datatype) {
+	if (datatype->flags == 0) return FALSE;
+	return (datatype->flags & ADSDATATYPEFLAG_DATAITEM) == ADSDATATYPEFLAG_DATAITEM;
+}
+
+TwinCatType getDatatype(PAdsDatatypeEntry datatypeEntry) {
+	std::string name{ PADSDATATYPENAME(datatypeEntry) };
+	std::string type{ PADSDATATYPETYPE(datatypeEntry) };
+	std::string comment{ PADSDATATYPECOMMENT(datatypeEntry) };
+	std::map<std::string, TwinCatType> subItems{};
+	for (UINT uiIndex = 0; uiIndex < datatypeEntry->subItems; uiIndex++)
+	{
+		PAdsDatatypeEntry subEntry = AdsDatatypeStructItem(datatypeEntry, uiIndex);
+		subItems[PADSDATATYPENAME(subEntry)] = getDatatype(subEntry);
+	}
+	ADS_UINT32		entryLength = datatypeEntry->entryLength;
+	ADS_UINT32		version = datatypeEntry->version;
+	ADS_UINT32		hashValue = datatypeEntry->hashValue;
+	ADS_UINT32		offsGetCode = datatypeEntry->offsGetCode;
+	ADS_UINT32		typeHashValue = datatypeEntry->typeHashValue;
+	ADS_UINT32		offsSetCode = datatypeEntry->offsSetCode;
+	ADS_UINT32		size = datatypeEntry->size;
+	ADS_UINT32		offs = datatypeEntry->offs;
+	ADS_UINT32		dataType = datatypeEntry->dataType;
+	ADS_UINT32		flags = datatypeEntry->flags;
+	ADS_UINT16		arrayDim = datatypeEntry->arrayDim;
+	std::vector<TwinCatArray> arrayVector{};
+	PAdsDatatypeArrayInfo arrayInfo = PADSDATATYPEARRAYINFO(datatypeEntry);
+	for (UINT uiIndex = 0; uiIndex < arrayDim; uiIndex++) {
+		unsigned long bound = arrayInfo->lBound;
+		unsigned long size = arrayInfo->elements;
+		arrayVector.push_back(TwinCatArray{bound, size});
+		arrayInfo = (*((unsigned long*)(((char*)arrayInfo) + (sizeof(AdsDatatypeArrayInfo)))) \
+			? ((PAdsDatatypeArrayInfo)(((char*)arrayInfo) + (sizeof(AdsDatatypeArrayInfo)))) : NULL);
+	}
+	return TwinCatType{ name, type, comment, subItems, entryLength, version, hashValue, offsGetCode, typeHashValue, offsSetCode, size, offs, dataType, flags, arrayDim, arrayVector };
+}
+
+// Returns all datatype declarations
+auto getDatatypeMap(PAmsAddr pAddr, AdsSymbolUploadInfo2 info) {
+	std::map<std::string, TwinCatType> datatypes{};
+	auto [nErr, datatypeUpload] = getDatatypeUpload(pAddr, info);
+	if (nErr) return std::make_pair(nErr, datatypes);
+	PAdsDatatypeEntry datatypeEntry = (PAdsDatatypeEntry)datatypeUpload;
+	for (UINT uiIndex = 0; uiIndex < info.nDatatypes; uiIndex++)
+	{
+		std::string name{ PADSDATATYPENAME(datatypeEntry) };
+		datatypes[name] = getDatatype(datatypeEntry);
+		datatypeEntry = (*((unsigned long*)(((char*)datatypeEntry) + ((PAdsDatatypeEntry)datatypeEntry)->entryLength)) \
+			? ((PAdsDatatypeEntry)(((char*)datatypeEntry) + ((PAdsDatatypeEntry)datatypeEntry)->entryLength)) : NULL);
+	}
+	if (datatypeUpload) delete(datatypeUpload);
+	return std::make_pair(nErr, datatypes);
+}
+
 // Returns all symbol/variable declarations
-auto getSymbolMap(PAmsAddr pAddr) {
+auto getSymbolMap(PAmsAddr pAddr, AdsSymbolUploadInfo2 info, std::map<std::string, TwinCatType> datatypes) {
 	std::map<std::string, TwinCatVar> symbols{};
-	AdsSymbolUploadInfo tAdsSymbolUploadInfo;
-	long nErr = AdsSyncReadReq(pAddr, ADSIGRP_SYM_UPLOADINFO, 0x0, sizeof(tAdsSymbolUploadInfo), &tAdsSymbolUploadInfo);
-	if (nErr) return std::make_pair(nErr, symbols);
-	char* pchSymbols = new char[tAdsSymbolUploadInfo.nSymSize];
-	nErr = AdsSyncReadReq(pAddr, ADSIGRP_SYM_UPLOAD, 0, tAdsSymbolUploadInfo.nSymSize, pchSymbols);
+	auto [nErr, pchSymbols] = getSymbolUpload(pAddr, info);
 	if (nErr) return std::make_pair(nErr, symbols);
 	PAdsSymbolEntry pAdsSymbolEntry = (PAdsSymbolEntry)pchSymbols;
-	for (UINT uiIndex = 0; uiIndex < tAdsSymbolUploadInfo.nSymbols; uiIndex++)
+	for (UINT uiIndex = 0; uiIndex < info.nSymbols; uiIndex++)
 	{
 		std::string name{ PADSSYMBOLNAME(pAdsSymbolEntry) };
 		ULONG indexGroup = pAdsSymbolEntry->iGroup;
@@ -93,62 +213,136 @@ auto getSymbolMap(PAmsAddr pAddr) {
 		ULONG size = pAdsSymbolEntry->size;
 		std::string type{ PADSSYMBOLTYPE(pAdsSymbolEntry) };
 		std::string comment{ PADSSYMBOLCOMMENT(pAdsSymbolEntry) };
-		symbols[name] = TwinCatVar{ name,indexGroup,indexOffset,size,type,comment };
+		TwinCatType datatype = datatypes[type];
+		symbols[name] = TwinCatVar{ name,indexGroup,indexOffset,size,type,comment,datatype };
 		pAdsSymbolEntry = PADSNEXTSYMBOLENTRY(pAdsSymbolEntry);
 	}
 	if (pchSymbols) delete(pchSymbols);
 	return std::make_pair(nErr, symbols);
 }
 
+std::pair<long, std::string> getVariableJSONValue(PAmsAddr pAddr, TwinCatType datatype, ULONG indexGroup, ULONG indexOffset, bool aryItem = false);
+
+// Adapted from: https://github.com/jisotalo/ads-client/blob/master/src/ads-client.js
+std::string parseArray(PAmsAddr pAddr, TwinCatType datatype, ULONG indexGroup, ULONG indexOffset, ADS_UINT16 dim) {
+	std::stringstream rstream;
+	rstream << "[";
+	ULONG offset = 0;
+	bool first = true;
+	for (ADS_UINT16 i = 0; i < datatype.arrayVector[dim].size; i++) {
+		if (!first) {
+			rstream << ",";
+		}
+		else {
+			first = false;
+		}
+		if ((dim + 1) < datatype.arrayVector.size()) {
+			rstream << parseArray(pAddr, datatype, indexGroup, indexOffset, dim + 1);
+		}
+		else {
+			rstream << getVariableJSONValue(pAddr, datatype, indexGroup, indexOffset + offset, true).second;
+			offset += datatype.size;
+		}
+	}
+	rstream << "]";
+	return rstream.str();
+}
+
 // Reads value of symbol/variable and returns JSON string representation
-auto getVariableJSONValue(PAmsAddr pAddr, TwinCatVar variable) {
+std::pair<long, std::string> getVariableJSONValue(PAmsAddr pAddr, TwinCatType datatype, ULONG indexGroup, ULONG indexOffset, bool aryItem) {
 	long nErr{};
 	std::string value;
-	if (variable.type == "BOOL") {
-		auto [err, data] = readGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, bool{}, nErr);
-		value = (data ? "true" : "false");
+	if ((datatype.arrayDim == 0 || aryItem) && datatype.subItems.size() > 0) {
+		std::stringstream vstream;
+		vstream << "{";
+		bool first = true;
+		for (const auto& [key, value] : datatype.subItems) {
+			if (!first) {
+				vstream << ",";
+			}
+			else {
+				first = false;
+			}
+			vstream << "\"" << key << "\":";
+			auto [err, data] = getVariableJSONValue(pAddr, value, indexGroup, indexOffset + value.offs);
+			if (err) {
+				nErr = err;
+				vstream << "null";
+			}
+			else {
+				vstream << data;
+			}
+		}
+		vstream << "}";
+		value = vstream.str();
 	}
-	else if (variable.type == "USINT") {
-		readGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, UINT8{}, nErr, value);
-	}
-	else if (variable.type == "SINT") {
-		readGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, INT8{}, nErr, value);
-	}
-	else if (variable.type == "UINT" || variable.type == "WORD") {
-		readGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, UINT16{}, nErr, value);
-	}
-	else if (variable.type == "INT") {
-		readGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, INT16{}, nErr, value);
-	}
-	else if (variable.type == "UDINT" || variable.type == "DWORD") {
-		readGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, UINT32{}, nErr, value);
-	}
-	else if (variable.type == "DINT") {
-		readGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, INT32{}, nErr, value);
-	}
-	else if (variable.type == "ULINT" || variable.type == "LWORD") {
-		readGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, UINT64{}, nErr, value);
-	}
-	else if (variable.type == "LINT") {
-		readGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, INT64{}, nErr, value);
-	}
-	else if (variable.type == "REAL") {
-		readGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, float{}, nErr, value);
-	}
-	else if (variable.type == "LREAL") {
-		readGroupOffset(pAddr, variable.indexGroup, variable.indexOffset, double{}, nErr, value);
+	else if (datatype.arrayDim > 0 && !aryItem) {
+		value = parseArray(pAddr, datatype, indexGroup, indexOffset, 0);
 	}
 	else {
-		char pData[256];
-		nErr = AdsSyncReadReq(pAddr, variable.indexGroup, variable.indexOffset, variable.size, &pData);
-		if (!nErr) {
-			std::string extendedValue{ pData };
-			std::stringstream vstream;
-			vstream << "\"" << extendedValue.substr(0, variable.size) << "\"";
-			value = vstream.str();
+		switch ((ADSDATATYPE)datatype.dataType)
+		{
+		case ADST_VOID:
+			value = "null";
+			break;
+		case ADST_BIT:
+		{
+			auto [err, data] = readGroupOffset(pAddr, indexGroup, indexOffset, bool{}, nErr);
+			value = (data ? "true" : "false");
+		}
+		break;
+		case ADST_INT8:
+			readGroupOffset(pAddr, indexGroup, indexOffset, INT8{}, nErr, value);
+			break;
+		case ADST_INT16:
+			readGroupOffset(pAddr, indexGroup, indexOffset, INT16{}, nErr, value);
+			break;
+		case ADST_INT32:
+			readGroupOffset(pAddr, indexGroup, indexOffset, INT32{}, nErr, value);
+			break;
+		case ADST_INT64:
+			readGroupOffset(pAddr, indexGroup, indexOffset, INT64{}, nErr, value);
+			break;
+		case ADST_UINT8:
+			readGroupOffset(pAddr, indexGroup, indexOffset, UINT8{}, nErr, value);
+			break;
+		case ADST_UINT16:
+			readGroupOffset(pAddr, indexGroup, indexOffset, UINT16{}, nErr, value);
+			break;
+		case ADST_UINT32:
+			readGroupOffset(pAddr, indexGroup, indexOffset, UINT32{}, nErr, value);
+			break;
+		case ADST_UINT64:
+			readGroupOffset(pAddr, indexGroup, indexOffset, UINT64{}, nErr, value);
+			break;
+		case ADST_REAL32:
+			readGroupOffset(pAddr, indexGroup, indexOffset, float{}, nErr, value);
+			break;
+		case ADST_REAL64:
+			readGroupOffset(pAddr, indexGroup, indexOffset, double{}, nErr, value);
+			break;
+		case ADST_STRING:
+		{
+			char pData[256];
+			nErr = AdsSyncReadReq(pAddr, indexGroup, indexOffset, datatype.size, &pData);
+			if (!nErr) {
+				std::string extendedValue{ pData };
+				std::stringstream vstream;
+				vstream << "\"" << extendedValue.substr(0, datatype.size) << "\"";
+				value = vstream.str();
+			}
+		}
+		break;
+		default:
+			nErr = ADSERR_DEVICE_INVALIDDATA;
+			break;
 		}
 	}
 	return std::pair(nErr, value);
+}
+
+auto getVariableJSONValue(PAmsAddr pAddr, TwinCatVar variable) {
+	return getVariableJSONValue(pAddr, variable.datatype, variable.indexGroup, variable.indexOffset);
 }
 
 // Updates symbol/variable based on provided json value
@@ -228,13 +422,18 @@ int main(int argc, const char** argv)
 
 	// Map for storing symbol/variable definitions
 	std::map<std::string, TwinCatVar> symbols{};
+	std::map<std::string, TwinCatType> datatypes{};
 
 	// Regulary fetch infromation about symbols/variables
 	std::cout << "Starting symbol declaration update thread..." << '\n';
-	std::jthread t1([pAddr, &symbols] {
+	std::jthread t1([pAddr, &symbols, &datatypes] {
 		using namespace std::chrono_literals;
 	while (true) {
-		symbols = getSymbolMap(pAddr).second;
+		auto [nErr, uploadInfo] = getUploadInfo(pAddr);
+		if (!nErr) {
+			datatypes = getDatatypeMap(pAddr, uploadInfo).second;
+			symbols = getSymbolMap(pAddr, uploadInfo, datatypes).second;
+		}
 		std::this_thread::sleep_for(5s);
 	}
 		});
@@ -363,7 +562,7 @@ int main(int argc, const char** argv)
 	res.set_content(strstream.str(), "text/json");
 		});
 
-	svr.Get(R"(/symbol/((\w|\.)+)/value)", [pAddr, &symbols](const httplib::Request& req, httplib::Response& res) {
+	svr.Get(R"(/symbol/((\w|\.)+)/value)", [pAddr, &symbols, &datatypes](const httplib::Request& req, httplib::Response& res) {
 		std::vector<std::string> paths = splitPath(req.path);
 	std::string nameStr = paths.at(2);
 	std::stringstream strstream;
@@ -411,7 +610,7 @@ int main(int argc, const char** argv)
 	res.set_content(strstream.str(), "text/json");
 		});
 
-	svr.Post(R"(/state)", [pAddr, &symbols](const httplib::Request& req, httplib::Response& res, const httplib::ContentReader& content_reader) {
+	svr.Post(R"(/state)", [pAddr](const httplib::Request& req, httplib::Response& res, const httplib::ContentReader& content_reader) {
 		std::vector<std::string> paths = splitPath(req.path);
 	std::stringstream strstream;
 	std::string body;
